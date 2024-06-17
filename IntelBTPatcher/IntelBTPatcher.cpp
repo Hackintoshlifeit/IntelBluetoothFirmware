@@ -8,6 +8,7 @@
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
 #include <Headers/plugin_start.hpp>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "IntelBTPatcher.hpp"
 
@@ -37,7 +38,7 @@ PluginConfiguration ADDPR(config) {
     bootargBeta,
     arrsize(bootargBeta),
     KernelVersion::MountainLion,
-    KernelVersion::Sonoma,
+    KernelVersion::Sequoia,
     []() {
         ibtPatcher.init();
     }
@@ -158,17 +159,24 @@ IOBufferMemoryDescriptor *writeHCIDescriptor = nullptr;
 #define HCI_OP_LE_SET_SCAN_PARAM    0x200B
 #define HCI_OP_LE_SET_SCAN_ENABLE   0x200C
 
-IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data, IOMemoryDescriptor *descriptor, unsigned int &length, IOUSBHostCompletion *completion, unsigned int timeout)
-{
+IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data, IOMemoryDescriptor *descriptor, unsigned int &length, IOUSBHostCompletion *completion, unsigned int timeout) {
     HciCommandHdr *hdr = nullptr;
     uint32_t hdrLen = 0;
     char hciBuf[MAX_HCI_BUF_LEN] = {0};
-    
+
     if (data == nullptr) {
         if (descriptor != nullptr && descriptor->getLength() > 0) {
+            IOReturn prepareResult = descriptor->prepare();
+            if (prepareResult != kIOReturnSuccess) {
+                SYSLOG(DRV_NAME, "Failed to prepare IOMemoryDescriptor: %x", prepareResult);
+                return prepareResult;
+            }
+
             descriptor->readBytes(0, hciBuf, min(descriptor->getLength(), MAX_HCI_BUF_LEN));
             hdrLen = (uint32_t)min(descriptor->getLength(), MAX_HCI_BUF_LEN);
+            descriptor->complete();
         }
+
         hdr = (HciCommandHdr *)hciBuf;
         if (hdr->opcode == HCI_OP_LE_SET_SCAN_PARAM) {
             if (!_randomAddressInit) {
@@ -180,9 +188,11 @@ IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, 
                 length = 9;
                 if (writeHCIDescriptor == nullptr)
                     writeHCIDescriptor = IOBufferMemoryDescriptor::withBytes(randomAddressHci, 9, kIODirectionOut);
+                
                 writeHCIDescriptor->prepare(kIODirectionOut);
                 IOReturn ret = FunctionCast(newHostDeviceRequest, callbackIBTPatcher->oldHostDeviceRequest)(that, provider, randomAddressRequest, nullptr, writeHCIDescriptor, length, nullptr, timeout);
                 writeHCIDescriptor->complete();
+
                 const char *randAddressDump = _hexDumpHCIData((uint8_t *)randomAddressHci, 9);
                 if (randAddressDump) {
                     SYSLOG(DRV_NAME, "[PATCH] Sending Random Address HCI %lld %s", ret, randAddressDump);
@@ -196,12 +206,19 @@ IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, 
         hdr = (HciCommandHdr *)data;
         hdrLen = request.wLength - 3;
     }
+
     if (hdr) {
         // HCI reset, we need to send Random address again
         if (hdr->opcode == HCI_OP_RESET)
             _randomAddressInit = false;
+
 #if DEBUG
-        DBGLOG(DRV_NAME, "[%s] bRequest: 0x%x direction: %s type: %s recipient: %s wValue: 0x%02x wIndex: 0x%02x opcode: 0x%04x len: %d length: %d async: %d", provider->getName(), request.bRequest, requestDirectionNames[(request.bmRequestType & kDeviceRequestDirectionMask) >> kDeviceRequestDirectionPhase], requestRecipientNames[(request.bmRequestType & kDeviceRequestRecipientMask) >> kDeviceRequestRecipientPhase], requestTypeNames[(request.bmRequestType & kDeviceRequestTypeMask) >> kDeviceRequestTypePhase], request.wValue, request.wIndex, hdr->opcode, hdr->len, request.wLength, completion != nullptr);
+        DBGLOG(DRV_NAME, "[%s] bRequest: 0x%x direction: %s type: %s recipient: %s wValue: 0x%02x wIndex: 0x%02x opcode: 0x%04x len: %d length: %d async: %d",
+               provider->getName(), request.bRequest,
+               requestDirectionNames[(request.bmRequestType & kDeviceRequestDirectionMask) >> kDeviceRequestDirectionPhase],
+               requestRecipientNames[(request.bmRequestType & kDeviceRequestRecipientMask) >> kDeviceRequestRecipientPhase],
+               requestTypeNames[(request.bmRequestType & kDeviceRequestTypeMask) >> kDeviceRequestTypePhase],
+               request.wValue, request.wIndex, hdr->opcode, hdr->len, request.wLength, completion != nullptr);
         if (hdrLen) {
             const char *dump = _hexDumpHCIData((uint8_t *)hdr, hdrLen);
             if (dump) {
@@ -211,5 +228,8 @@ IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, 
         }
 #endif
     }
-    return FunctionCast(newHostDeviceRequest, callbackIBTPatcher->oldHostDeviceRequest)(that, provider, request, data, descriptor, length, completion, timeout);
+
+    IOReturn result = FunctionCast(newHostDeviceRequest, callbackIBTPatcher->oldHostDeviceRequest)(that, provider, request, data, descriptor, length, completion, timeout);
+    SYSLOG(DRV_NAME, "Request completed with result: %x", result);
+    return result;
 }
