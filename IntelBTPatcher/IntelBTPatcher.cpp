@@ -194,16 +194,17 @@ IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, 
     char hciBuf[MAX_HCI_BUF_LEN] = {0};
 
     if (data == nullptr) {
-        if (descriptor != nullptr && descriptor->getLength() > 0) {
+        if (descriptor != nullptr && (getKernelVersion() < KernelVersion::Sequoia || descriptor->prepare())) {
+            if (descriptor->getLength() > 0) {
             IOReturn prepareResult = descriptor->prepare();
             if (prepareResult != kIOReturnSuccess) {
                 SYSLOG(DRV_NAME, "Failed to prepare IOMemoryDescriptor: %x", prepareResult);
                 return prepareResult;
             }
-
             descriptor->readBytes(0, hciBuf, min(descriptor->getLength(), MAX_HCI_BUF_LEN));
             hdrLen = (uint32_t)min(descriptor->getLength(), MAX_HCI_BUF_LEN);
-            descriptor->complete();
+            if (getKernelVersion() >= KernelVersion::Sequoia)
+                descriptor->complete();
         }
 
         hdr = (HciCommandHdr *)hciBuf;
