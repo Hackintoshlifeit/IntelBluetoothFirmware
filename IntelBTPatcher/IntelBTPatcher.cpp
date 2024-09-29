@@ -194,18 +194,15 @@ IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, 
     char hciBuf[MAX_HCI_BUF_LEN] = {0};
 
     if (data == nullptr) {
-        if (descriptor != nullptr && (getKernelVersion() < KernelVersion::Sequoia || descriptor->prepare())) {
-            if (descriptor->getLength() > 0) {
-            IOReturn prepareResult = descriptor->prepare();
-            if (prepareResult != kIOReturnSuccess) {
-                SYSLOG(DRV_NAME, "Failed to prepare IOMemoryDescriptor: %x", prepareResult);
-                return prepareResult;
+            if (descriptor != nullptr &&
+                (getKernelVersion() < KernelVersion::Sequoia || !descriptor->prepare(kIODirectionOut))) {
+                if (descriptor->getLength() > 0) {
+                    descriptor->readBytes(0, hciBuf, min(descriptor->getLength(), MAX_HCI_BUF_LEN));
+                    hdrLen = (uint32_t)min(descriptor->getLength(), MAX_HCI_BUF_LEN);
+                }
+                if (getKernelVersion() >= KernelVersion::Sequoia)
+                    descriptor->complete(kIODirectionOut);
             }
-            descriptor->readBytes(0, hciBuf, min(descriptor->getLength(), MAX_HCI_BUF_LEN));
-            hdrLen = (uint32_t)min(descriptor->getLength(), MAX_HCI_BUF_LEN);
-            if (getKernelVersion() >= KernelVersion::Sequoia)
-                descriptor->complete();
-        }
 
         hdr = (HciCommandHdr *)hciBuf;
         if (hdr->opcode == HCI_OP_LE_SET_SCAN_PARAM) {
@@ -221,7 +218,7 @@ IOReturn CIntelBTPatcher::newHostDeviceRequest(void *that, IOService *provider, 
                 
                 writeHCIDescriptor->prepare(kIODirectionOut);
                 IOReturn ret = FunctionCast(newHostDeviceRequest, callbackIBTPatcher->oldHostDeviceRequest)(that, provider, randomAddressRequest, nullptr, writeHCIDescriptor, length, nullptr, timeout);
-                writeHCIDescriptor->complete();
+                writeHCIDescriptor->complete(kIODirectionOut);
 
                 const char *randAddressDump = _hexDumpHCIData((uint8_t *)randomAddressHci, 9);
                 if (randAddressDump) {
